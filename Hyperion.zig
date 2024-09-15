@@ -599,13 +599,28 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                 continue;
             }
         }
+        if (std.mem.indexOfScalar(u8, nextfile.path, '.')) |dot_index| {
+            const after_dot = nextfile.path[dot_index + 1 ..];
+            if (std.mem.indexOfScalar(u8, after_dot, std.fs.path.sep)) |_| {
+                // This is a hidden file or directory, or inside a hidden directory
+                continue;
+            }
+        }
+        var filepath: []const u8 = undefined;
+        if (std.fs.path.dirname(nextfile.path)) |dir| {
+            filepath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, nextfile.basename });
+        } else {
+            filepath = try std.fmt.allocPrint(allocator, "{s}", .{nextfile.basename});
+        }
+        const relpath = try std.fs.path.relative(allocator, path, filepath);
         if (nextfile.kind == .file) {
+            try matchedfiles.append(filepath);
+            try matchedfiles.append(relpath);
             const filedepth = std.mem.count(u8, nextfile.path, "/");
             const indentlevel = if (filedepth == 0) 0 else filedepth;
             if (std.mem.startsWith(u8, nextfile.basename, ".")) {
                 continue;
             } else if (nextfile.basename.len > 20) {
-                const filename = try allocator.dupe(u8, nextfile.basename[0..20]);
                 if (filedepth > 0) {
                     const indent = try allocator.alloc(u8, indentlevel);
                     @memset(indent, ' ');
@@ -623,11 +638,8 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                         opstring,
                     );
                 }
-                try matchedfiles.append(filename);
                 try abappend(&buff, allocator, "\n \x1b[0G");
             } else {
-                const filename = try allocator.dupe(u8, nextfile.basename);
-                try matchedfiles.append(filename);
                 if (filedepth > 0) {
                     const indent = try allocator.alloc(u8, filedepth);
                     @memset(indent, ' ');
@@ -648,16 +660,16 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                 try abappend(&buff, allocator, "\n \x1b[0G");
             }
         } else if (nextfile.kind == .directory) {
+            try matchedfiles.append(filepath);
+            try matchedfiles.append(relpath);
             const filedepth = std.mem.count(u8, nextfile.path, "/");
             const indentlevel = if (filedepth == 0) 0 else filedepth;
-
             if (nextfile.basename.len > 20) {
                 const filename = try allocator.dupe(u8, nextfile.basename[0..20]);
                 if (indentlevel > 0) {
                     const indent = try allocator.alloc(u8, indentlevel);
                     @memset(indent, ' ');
                     const opstring = try std.fmt.allocPrint(allocator, "{s}L{s}", .{ indent, nextfile.basename[0..20] });
-                    try matchedfiles.append(filename);
                     try abappend(&buff, allocator, "\x1b[34m");
                     try abappend(
                         &buff,
@@ -682,8 +694,6 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                 }
             } else {
                 if (indentlevel > 0) {
-                    const filename = try allocator.dupe(u8, nextfile.basename);
-                    try matchedfiles.append(filename);
                     const indent = try allocator.alloc(u8, indentlevel);
                     @memset(indent, ' ');
 
@@ -699,8 +709,6 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                     try abappend(&buff, allocator, "\x1b[0m");
                     try abappend(&buff, allocator, "\n \x1b[0G");
                 } else {
-                    const filename = try allocator.dupe(u8, nextfile.basename);
-                    try matchedfiles.append(filename);
                     const opstring = try std.fmt.allocPrint(allocator, "L{s}", .{nextfile.basename});
 
                     try abappend(&buff, allocator, "\x1b[34m");
@@ -727,7 +735,7 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
         while (true) {
             buff.len = 0;
             displayfiles.clearRetainingCapacity();
-            for (matchedfiles.items) |file| {
+            for (matchedfiles.items[1..]) |file| {
                 if (filesearch.items.len == 0 or std.mem.indexOf(u8, file, filesearch.items) != null) {
                     try displayfiles.insert(displayfiles.items.len, file);
                 }
@@ -738,9 +746,29 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                 try unique.put(value, {});
             }
             var it = unique.keyIterator();
+            var dir_list = std.ArrayList([]const u8).init(allocator);
+
             while (it.next()) |file| {
-                const filestring = try std.fmt.allocPrint(allocator, "\n \x1b[0G {s} ", .{file.*});
-                try abappend(&buff, allocator, filestring);
+                try dir_list.append(file.*);
+            }
+            const compareStrings = struct {
+                fn compare(_: void, lhs: []const u8, rhs: []const u8) bool {
+                    const lhs_slashes = std.mem.count(u8, lhs, "/");
+                    const rhs_slashes = std.mem.count(u8, rhs, "/");
+                    return lhs_slashes > rhs_slashes;
+                }
+            }.compare;
+            std.mem.sort([]const u8, dir_list.items, {}, compareStrings);
+            while (dir_list.popOrNull()) |file| {
+                if (std.mem.indexOf(u8, file, ".") != null) {
+                    const filestring = try std.fmt.allocPrint(allocator, "\n \x1b[0G {s} ", .{file});
+                    try abappend(&buff, allocator, filestring);
+                } else {
+                    const filestring = try std.fmt.allocPrint(allocator, "\n \x1b[0G {s} ", .{file});
+                    try abappend(&buff, allocator, "\x1b[34m");
+                    try abappend(&buff, allocator, filestring);
+                    try abappend(&buff, allocator, "\x1b[0m");
+                }
             }
             input = try readkeypress();
             switch (input) {
@@ -756,6 +784,48 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                         continue;
                     }
                 },
+                ' ' => {
+                    var newfile = std.ArrayList(u8).init(allocator);
+                    defer newfile.deinit();
+                    var temp: u8 = undefined;
+                    while (temp != '\r') {
+                        temp = try readkeypress();
+                        switch (temp) {
+                            '\r' => {
+                                if (newfile.getLast() == '/') {
+                                    const newdir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, newfile.items });
+                                    try std.fs.makeDirAbsolute(newdir);
+                                    const newdir_free = try allocator.dupe(u8, newdir);
+                                    try abappend(&buff, allocator, "\n \x1b[0G");
+                                    try abappend(&buff, allocator, newdir_free);
+                                    allocator.free(newdir);
+                                } else {
+                                    const newfilestring = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, newfile.items });
+                                    _ = try std.fs.createFileAbsolute(newfilestring, .{});
+                                    const newfilestring_free = try allocator.dupe(u8, newfilestring);
+                                    try abappend(&buff, allocator, "\n \x1b[0G");
+                                    try abappend(&buff, allocator, newfilestring_free);
+                                    allocator.free(newfilestring);
+                                }
+                                break;
+                            },
+                            127 => {
+                                if (newfile.items.len > 0) {
+                                    _ = newfile.pop();
+                                    const newstring = try std.fmt.allocPrint(allocator, "\x1b[{d}G \n \x1b[0G Search: {s}", .{ editorvar.numrows - 1, newfile.items });
+                                    try abappend(&buff, allocator, newstring);
+                                } else {
+                                    continue;
+                                }
+                            },
+                            else => {
+                                try newfile.append(temp);
+                            },
+                        }
+                        std.debug.print("\x1b[2J", .{});
+                        _ = try stdout.write(buff.b.?[0..buff.len]);
+                    }
+                },
                 else => {
                     try filesearch.append(input);
                     const searchstring = try std.fmt.allocPrint(allocator, "\x1b[{d}G \n \x1b[0G Search: {s}", .{ editorvar.numrows - 1, filesearch.items });
@@ -765,8 +835,6 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
             std.debug.print("\x1b[2J", .{});
             _ = try stdout.write(buff.b.?[0..buff.len]);
         }
-    } else if (input == 'a') {} else {
-        return;
     }
     const searchstring: []const u8 = try std.fmt.allocPrint(allocator, "{s}", .{filesearch.items});
     var flag: u8 = 0;
@@ -774,16 +842,29 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
         if (std.mem.eql(u8, searchstring, value)) {
             flag = 0;
             const fullpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, searchstring });
-            for (0..editorvar.numrows) |_| {
-                if (editorvar.row[0].chars) |chars| {
-                    allocator.free(chars);
-                }
+            const filetype = try std.fs.cwd().statFile(fullpath);
+            switch (filetype.kind) {
+                .directory => {
+                    var dir = try std.fs.cwd().openDir(fullpath, .{ .iterate = true });
+                    defer dir.close();
+                    try dir.setAsCwd();
+                    try opendirectory(allocator);
+                },
+                .file => {
+                    for (0..editorvar.numrows) |_| {
+                        if (editorvar.row[0].chars) |chars| {
+                            allocator.free(chars);
+                        }
+                    }
+                    allocator.free(editorvar.row);
+                    editorvar.row = &[_]erow{};
+                    editorvar.numrows = 0;
+                    try editoropen(allocator, fullpath);
+                    editorvar.dirty = 0;
+                    break;
+                },
+                else => {},
             }
-            allocator.free(editorvar.row);
-            editorvar.row = &[_]erow{};
-            editorvar.numrows = 0;
-            try editoropen(allocator, fullpath);
-            editorvar.dirty = 0;
             break;
         } else {
             flag = 1;
