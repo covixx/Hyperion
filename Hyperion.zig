@@ -22,6 +22,7 @@ const erow = struct {
     size: u16,
     chars: ?[]u8,
 };
+
 const StatusMessage = struct {
     message: [256]u8,
     time: i64,
@@ -192,21 +193,21 @@ pub fn writefile(allocator: std.mem.Allocator) !void {
                 const error_buffer_const: []const u8 = error_buffer.items;
                 try errorbuffer(allocator, error_buffer_const);
             } else {
-                try setStatusMessage("No errors in the file", 3);
+                try setStatusMessage("No errors in the file", 2);
             }
         }
     } else {
-        try setStatusMessage("File saved successfully", 3);
+        try setStatusMessage("File saved successfully", 2);
     }
 
     switch (result) {
         .Exited => |code| {
             if (code != 0) {
-                try setStatusMessage(try std.fmt.allocPrint(allocator, "Command exited with non-zero status: {d}", .{code}), 3);
+                try setStatusMessage(try std.fmt.allocPrint(allocator, "Command exited with non-zero status: {d}", .{code}), 2);
             }
         },
         else => {
-            try setStatusMessage("Command didn't exit normally", 3);
+            try setStatusMessage("Command didn't exit normally", 2);
         },
     }
 }
@@ -557,10 +558,13 @@ pub fn findNext() !void {
     try searchInRows();
 
     if (editorvar.cy == original_cy and editorvar.cx == original_cx) {
-        try setStatusMessage("No more occurrences found", 3);
+        try setStatusMessage("No more occurrences found", 2);
     }
 }
 
+//TODO: create newfile newdir with a
+//if search is dir display in format, display subfiles and folders
+//BUG: . firstcharacter is ignored
 pub fn opendirectory(allocator: std.mem.Allocator) !void {
     var buff = try abuf.init();
     defer buff.deinit(allocator);
@@ -571,42 +575,223 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
     var filebuffer = try iterablepath.walk(allocator);
     defer filebuffer.deinit();
     const stdout = std.io.getStdOut().writer();
+    var matchedfiles = std.ArrayList([]const u8).init(allocator);
+    var displayfiles = std.ArrayList([]const u8).init(allocator);
 
-    // Clear the screen and move cursor to top-left
-    while (true) {
-        const currfile = try filebuffer.next();
-        if (currfile) |nextfile| {
-            const opstring = try std.fmt.allocPrint(allocator, "{s} \n", .{nextfile.basename});
-            try abappend(&buff, allocator, "\x1b[0G");
-            try abappend(
-                &buff,
-                allocator,
-                opstring,
-            );
+    defer {
+        for (matchedfiles.items) |item| {
+            allocator.free(item);
+        }
+        matchedfiles.deinit();
+    }
+    defer {
+        for (displayfiles.items) |item| {
+            allocator.free(item);
+        }
+        displayfiles.deinit();
+    }
+
+    while (try filebuffer.next()) |nextfile| {
+        if (std.mem.indexOfScalar(u8, nextfile.path, '.')) |dot_index| {
+            const after_dot = nextfile.path[dot_index + 1 ..];
+            if (std.mem.indexOfScalar(u8, after_dot, std.fs.path.sep)) |_| {
+                // This is a hidden file or directory, or inside a hidden directory
+                continue;
+            }
+        }
+        if (nextfile.kind == .file) {
+            const filedepth = std.mem.count(u8, nextfile.path, "/");
+            const indentlevel = if (filedepth == 0) 0 else filedepth;
+            if (std.mem.startsWith(u8, nextfile.basename, ".")) {
+                continue;
+            } else if (nextfile.basename.len > 20) {
+                const filename = try allocator.dupe(u8, nextfile.basename[0..20]);
+                if (filedepth > 0) {
+                    const indent = try allocator.alloc(u8, indentlevel);
+                    @memset(indent, ' ');
+                    const opstring = try std.fmt.allocPrint(allocator, "{s}{s}", .{ indent, nextfile.basename[0..20] });
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+                } else {
+                    const opstring = try std.fmt.allocPrint(allocator, "{s}", .{nextfile.basename[0..20]});
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+                }
+                try matchedfiles.append(filename);
+                try abappend(&buff, allocator, "\n \x1b[0G");
+            } else {
+                const filename = try allocator.dupe(u8, nextfile.basename);
+                try matchedfiles.append(filename);
+                if (filedepth > 0) {
+                    const indent = try allocator.alloc(u8, filedepth);
+                    @memset(indent, ' ');
+                    const opstring = try std.fmt.allocPrint(allocator, "{s}{s}", .{ indent, nextfile.basename });
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+                } else {
+                    const opstring = try std.fmt.allocPrint(allocator, "{s}", .{nextfile.basename});
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+                }
+                try abappend(&buff, allocator, "\n \x1b[0G");
+            }
+        } else if (nextfile.kind == .directory) {
+            const filedepth = std.mem.count(u8, nextfile.path, "/");
+            const indentlevel = if (filedepth == 0) 0 else filedepth;
+
+            if (nextfile.basename.len > 20) {
+                const filename = try allocator.dupe(u8, nextfile.basename[0..20]);
+                if (indentlevel > 0) {
+                    const indent = try allocator.alloc(u8, indentlevel);
+                    @memset(indent, ' ');
+                    const opstring = try std.fmt.allocPrint(allocator, "{s}L{s}", .{ indent, nextfile.basename[0..20] });
+                    try matchedfiles.append(filename);
+                    try abappend(&buff, allocator, "\x1b[34m");
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+
+                    try abappend(&buff, allocator, "\x1b[0m");
+                    try abappend(&buff, allocator, "\n \x1b[0G");
+                } else {
+                    const opstring = try std.fmt.allocPrint(allocator, "L{s}", .{nextfile.basename[0..20]});
+                    try matchedfiles.append(filename);
+                    try abappend(&buff, allocator, "\x1b[34m");
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+
+                    try abappend(&buff, allocator, "\x1b[0m");
+                    try abappend(&buff, allocator, "\n \x1b[0G");
+                }
+            } else {
+                if (indentlevel > 0) {
+                    const filename = try allocator.dupe(u8, nextfile.basename);
+                    try matchedfiles.append(filename);
+                    const indent = try allocator.alloc(u8, indentlevel);
+                    @memset(indent, ' ');
+
+                    const opstring = try std.fmt.allocPrint(allocator, "{s}L{s}", .{ indent, nextfile.basename });
+
+                    try abappend(&buff, allocator, "\x1b[34m");
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+
+                    try abappend(&buff, allocator, "\x1b[0m");
+                    try abappend(&buff, allocator, "\n \x1b[0G");
+                } else {
+                    const filename = try allocator.dupe(u8, nextfile.basename);
+                    try matchedfiles.append(filename);
+                    const opstring = try std.fmt.allocPrint(allocator, "L{s}", .{nextfile.basename});
+
+                    try abappend(&buff, allocator, "\x1b[34m");
+                    try abappend(
+                        &buff,
+                        allocator,
+                        opstring,
+                    );
+
+                    try abappend(&buff, allocator, "\x1b[0m");
+                    try abappend(&buff, allocator, "\n \x1b[0G");
+                }
+            }
         } else {
             break;
         }
     }
     _ = try stdout.write(buff.b.?[0..buff.len]);
-    const input = try readkeypress();
-    //TODO: Add functionality to see what's entered, backspace functionality and display tree structured
+    buff.len = 0;
+    var filesearch = std.ArrayList(u8).init(allocator);
+    defer filesearch.deinit();
+    var input = try readkeypress();
     if (input == 'i') {
-        var openfile: [1024]u8 = undefined;
-        const line = try std.io.getStdIn().reader().readUntilDelimiter(&openfile, '\r');
-        const buffer = try std.fmt.allocPrint(allocator, "/home/covix/Zig/{s}", .{line});
-        for (0..editorvar.numrows) |_| {
-            if (editorvar.row[0].chars) |chars| {
-                allocator.free(chars);
+        while (true) {
+            buff.len = 0;
+            displayfiles.clearRetainingCapacity();
+            for (matchedfiles.items) |file| {
+                if (filesearch.items.len == 0 or std.mem.indexOf(u8, file, filesearch.items) != null) {
+                    try displayfiles.insert(displayfiles.items.len, file);
+                }
             }
+            var unique = std.StringHashMap(void).init(allocator);
+            defer unique.deinit();
+            for (displayfiles.items) |value| {
+                try unique.put(value, {});
+            }
+            var it = unique.keyIterator();
+            while (it.next()) |file| {
+                const filestring = try std.fmt.allocPrint(allocator, "\n \x1b[0G {s} ", .{file.*});
+                try abappend(&buff, allocator, filestring);
+            }
+            input = try readkeypress();
+            switch (input) {
+                '\r' => {
+                    break;
+                },
+                127 => {
+                    if (filesearch.items.len > 0) {
+                        _ = filesearch.pop();
+                        const searchstring = try std.fmt.allocPrint(allocator, "\x1b[{d}G \n \x1b[0G Search: {s}", .{ editorvar.numrows - 1, filesearch.items });
+                        try abappend(&buff, allocator, searchstring);
+                    } else {
+                        continue;
+                    }
+                },
+                else => {
+                    try filesearch.append(input);
+                    const searchstring = try std.fmt.allocPrint(allocator, "\x1b[{d}G \n \x1b[0G Search: {s}", .{ editorvar.numrows - 1, filesearch.items });
+                    try abappend(&buff, allocator, searchstring);
+                },
+            }
+            std.debug.print("\x1b[2J", .{});
+            _ = try stdout.write(buff.b.?[0..buff.len]);
         }
-        allocator.free(editorvar.row);
-        editorvar.row = &[_]erow{};
-        editorvar.numrows = 0;
-        try editoropen(allocator, buffer);
-        editorvar.dirty = 0;
+    } else if (input == 'a') {} else {
+        return;
     }
+    const searchstring: []const u8 = try std.fmt.allocPrint(allocator, "{s}", .{filesearch.items});
+    var flag: u8 = 0;
+    for (displayfiles.items) |value| {
+        if (std.mem.eql(u8, searchstring, value)) {
+            flag = 0;
+            const fullpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, searchstring });
+            for (0..editorvar.numrows) |_| {
+                if (editorvar.row[0].chars) |chars| {
+                    allocator.free(chars);
+                }
+            }
+            allocator.free(editorvar.row);
+            editorvar.row = &[_]erow{};
+            editorvar.numrows = 0;
+            try editoropen(allocator, fullpath);
+            editorvar.dirty = 0;
+            break;
+        } else {
+            flag = 1;
+            continue;
+        }
+    }
+    try setStatusMessage("No file found", 3);
 }
-
 pub fn readkeypress() !u8 {
     const stdin = std.io.getStdIn().reader();
     var char: u8 = 0;
@@ -1106,8 +1291,7 @@ pub fn main() !void {
         try editoropen(allocator, "Untitled");
     }
 
-    std.debug.print("Working main", .{});
-    try setStatusMessage("Hyperion - 0.1.0", 5);
+    try setStatusMessage("Hyperion - 0.1.0", 2);
 
     while (true) {
         try refreshscreen(allocator);
