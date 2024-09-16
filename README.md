@@ -1,4 +1,4 @@
-Hyperion started off 2 weeks ago as a Zig implementation of Kilo by antirez, but I have been trying to add functionality on top of it ever since. Currently Hyperion supports: 
+Hyperion started off in the beginning of September as a Zig implementation of Kilo by antirez, but I have been trying to add functionality on top of it ever since. Currently Hyperion supports: 
 - I/O 
 - Directory Navigation 
 - Syntax Highlighting (static)
