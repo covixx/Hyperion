@@ -10,6 +10,7 @@ const c_header = @cImport({
     @cInclude("time.h");
     @cInclude("string.h");
 });
+var initialcwd: []u8 = undefined;
 const mem = std.mem;
 const ArrayList = std.ArrayList;
 const STD_FILENO = 0;
@@ -561,9 +562,6 @@ pub fn findNext() !void {
         try setStatusMessage("No more occurrences found", 2);
     }
 }
-
-//TODO: create newfile newdir with a
-//if search is dir display in format, display subfiles and folders
 //BUG: . firstcharacter is ignored
 pub fn opendirectory(allocator: std.mem.Allocator) !void {
     var buff = try abuf.init();
@@ -571,7 +569,7 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
     try abappend(&buff, allocator, "\x1b[2J");
     try abappend(&buff, allocator, "\x1b[H");
     const path = try std.fs.cwd().realpathAlloc(allocator, ".");
-    const iterablepath = try std.fs.openDirAbsolute(path, .{ .iterate = true });
+    var iterablepath = try std.fs.openDirAbsolute(path, .{ .iterate = true });
     var filebuffer = try iterablepath.walk(allocator);
     defer filebuffer.deinit();
     const stdout = std.io.getStdOut().writer();
@@ -585,11 +583,10 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
         matchedfiles.deinit();
     }
     defer {
-        for (displayfiles.items) |item| {
-            allocator.free(item);
-        }
         displayfiles.deinit();
     }
+    defer allocator.free(path);
+    defer iterablepath.close();
 
     while (try filebuffer.next()) |nextfile| {
         if (std.mem.indexOfScalar(u8, nextfile.path, '.')) |dot_index| {
@@ -747,7 +744,7 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
             }
             var it = unique.keyIterator();
             var dir_list = std.ArrayList([]const u8).init(allocator);
-
+            defer dir_list.deinit();
             while (it.next()) |file| {
                 try dir_list.append(file.*);
             }
@@ -818,12 +815,28 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                                     continue;
                                 }
                             },
+
                             else => {
                                 try newfile.append(temp);
                             },
                         }
                         std.debug.print("\x1b[2J", .{});
                         _ = try stdout.write(buff.b.?[0..buff.len]);
+                    }
+                },
+                '`' => {
+                    const currpath = try std.fs.cwd().realpathAlloc(allocator, ".");
+                    if (std.mem.eql(u8, initialcwd, currpath) == true) {
+                        return;
+                    } else {
+                        const lastindex = std.mem.lastIndexOf(u8, currpath, "/") orelse 0;
+                        const netpath = currpath[0..lastindex];
+                        if (netpath.len > 0) {
+                            var dir = try std.fs.cwd().openDir(netpath, .{ .iterate = true });
+                            defer dir.close();
+                            try dir.setAsCwd();
+                            try opendirectory(allocator);
+                        }
                     }
                 },
                 else => {
@@ -836,12 +849,14 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
             _ = try stdout.write(buff.b.?[0..buff.len]);
         }
     }
-    const searchstring: []const u8 = try std.fmt.allocPrint(allocator, "{s}", .{filesearch.items});
+    const searchstring: []const u8 = try allocator.dupe(u8, filesearch.items);
+    defer allocator.free(searchstring);
     var flag: u8 = 0;
     for (displayfiles.items) |value| {
         if (std.mem.eql(u8, searchstring, value)) {
             flag = 0;
             const fullpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, searchstring });
+            defer allocator.free(fullpath);
             const filetype = try std.fs.cwd().statFile(fullpath);
             switch (filetype.kind) {
                 .directory => {
@@ -851,11 +866,6 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
                     try opendirectory(allocator);
                 },
                 .file => {
-                    for (0..editorvar.numrows) |_| {
-                        if (editorvar.row[0].chars) |chars| {
-                            allocator.free(chars);
-                        }
-                    }
                     allocator.free(editorvar.row);
                     editorvar.row = &[_]erow{};
                     editorvar.numrows = 0;
@@ -871,7 +881,9 @@ pub fn opendirectory(allocator: std.mem.Allocator) !void {
             continue;
         }
     }
-    try setStatusMessage("No file found", 3);
+    if (flag == 1) {
+        try setStatusMessage("No file found", 3);
+    }
 }
 pub fn readkeypress() !u8 {
     const stdin = std.io.getStdIn().reader();
@@ -1020,11 +1032,12 @@ pub fn appendrow(allocator: std.mem.Allocator, at: u16) !void {
     prev_row.size = new_size;
 
     // Remove the current row
+    allocator.free(current_row.chars.?);
     for (at..editorvar.numrows - 1) |i| {
         editorvar.row[i] = editorvar.row[i + 1];
     }
     editorvar.numrows -= 1;
-    editorvar.row = try allocator.realloc(editorvar.row, editorvar.numrows);
+    editorvar.row = try allocator.realloc(editorvar.row, editorvar.numrows * @sizeOf(erow));
 
     editorvar.dirty = 1;
 }
@@ -1032,8 +1045,9 @@ pub fn deletecharatrow(row: *erow, at: u16) !void {
     if (at >= row.size) {
         return;
     }
-    std.mem.copyForwards(u8, row.chars.?[at..row.size], row.chars.?[at + 1 .. row.size]);
+    std.mem.copyForwards(u8, row.chars.?[at .. row.size - 1], row.chars.?[at + 1 .. row.size]);
     row.size -= 1;
+    row.chars = row.chars.?[0..row.size];
 }
 pub fn deletechar(allocator: std.mem.Allocator) !void {
     if (editorvar.cy == editorvar.numrows) {
@@ -1045,10 +1059,11 @@ pub fn deletechar(allocator: std.mem.Allocator) !void {
         editorvar.cx -= 1;
     } else if (editorvar.cy > 0) {
         // We're at the beginning of a line, so append this row to the previous one
-        editorvar.cx = editorvar.row[editorvar.cy - 1].size; // Move cursor to end of previous line
-        try appendrow(allocator, editorvar.cy);
         editorvar.cy -= 1;
+        editorvar.cx = editorvar.row[editorvar.cy].size;
+        try appendrow(allocator, editorvar.cy + 1);
     }
+    editorvar.dirty = 1;
 }
 pub fn removeBlankLines(allocator: std.mem.Allocator) !void {
     var i: usize = 0;
@@ -1339,7 +1354,6 @@ pub fn refreshscreen(allocator: std.mem.Allocator) !void {
     const stdout = std.io.getStdOut().writer();
     _ = try stdout.write(buf.b.?[0..buf.len]);
 }
-
 pub fn setStatusMessage(msg: []const u8, timeout_secs: i64) !void {
     const timestamp = std.time.timestamp();
     @memcpy(statusmsg.message[0..msg.len], msg);
@@ -1356,13 +1370,11 @@ pub fn main() !void {
     // Access command-line arguments
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
-
     var filename: ?[]const u8 = null;
-
+    initialcwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     if (args.len > 1) {
         filename = args[1]; // Use the first argument as the file name
     }
-
     try rawmode();
     try initeditor(allocator);
 
