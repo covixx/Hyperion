@@ -1,4 +1,5 @@
-Hyperion started off in the beginning of September as a Zig implementation of Kilo by antirez, but I have been trying to add functionality on top of it ever since. Currently Hyperion supports: 
+Hyperion started off in mid-September as my first non-trivial project, as a Zig port of Kilo by antirez, and I have been trying to add functionality on top of it ever since. 
+Currently Hyperion supports: 
 - I/O 
 - Directory Navigation 
 - Syntax Highlighting (static)
@@ -15,4 +16,4 @@ Features planned:
 - Modes and keyboard shortcuts
 - Multi-language support
 
-Mostly because I'm learning as I go along, new feature support will be slow but constant. 
+Currently Hyperion is on the backburner as I learn more employable technologies, but post December updates and new feature support will resume.
